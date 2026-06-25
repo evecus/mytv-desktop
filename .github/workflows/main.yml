@@ -31,7 +31,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-
+  
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -59,17 +59,50 @@ jobs:
       # ── Windows: download mpv-dev (includes mpv-2.dll + headers) ─
       - name: Download mpv-dev for Windows
         if: matrix.platform == 'windows'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          $url = "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20240121-git-a39f3c6.7z/download"
-          Invoke-WebRequest -Uri $url -OutFile mpv-dev.7z
+          # Dynamically find the latest mpv-dev x86_64 asset from shinchiro builds
+          $release = gh api repos/shinchiro/mpv-winbuild-cmake/releases `
+            --jq '[.[] | select(.assets | length > 0)][0]' | ConvertFrom-Json
+          $asset = $release.assets | Where-Object { $_.name -match "mpv-dev-x86_64" } | Select-Object -First 1
+          if (-not $asset) {
+            # Fallback: try any x86_64 dev zip
+            $asset = $release.assets | Where-Object { $_.name -match "x86_64" -and $_.name -match "dev" } | Select-Object -First 1
+          }
+          if (-not $asset) {
+            Write-Error "No mpv-dev asset found in latest release"
+            exit 1
+          }
+
+          Write-Host "Downloading: $($asset.name) from $($asset.browser_download_url)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile mpv-dev.7z
+
+          # Extract
           7z x mpv-dev.7z -ompv-dev -y
-          # Copy mpv-2.dll next to the future exe (Tauri bundles resources)
+
+          # Locate mpv-2.dll (may be in root or a subdir)
+          $dll = Get-ChildItem -Recurse -Filter "mpv-2.dll" | Select-Object -First 1
+          if (-not $dll) {
+            Write-Host "Files found:"
+            Get-ChildItem -Recurse mpv-dev | Select-Object FullName
+            Write-Error "mpv-2.dll not found"
+            exit 1
+          }
+          Write-Host "Found dll: $($dll.FullName)"
+
+          # Locate include dir
+          $includeDir = Get-ChildItem -Recurse -Filter "client.h" | Select-Object -First 1
+          $includePath = if ($includeDir) { $includeDir.DirectoryName } else { "mpv-dev\include" }
+
           New-Item -ItemType Directory -Force -Path src-tauri/mpv-libs
-          Copy-Item mpv-dev/mpv-2.dll src-tauri/mpv-libs/mpv-2.dll
-          # Set env vars so libmpv crate can find the headers+lib
-          echo "MPV_INCLUDE_DIR=$pwd\mpv-dev\include" >> $env:GITHUB_ENV
-          echo "MPV_LIB_DIR=$pwd\mpv-dev"             >> $env:GITHUB_ENV
+          Copy-Item $dll.FullName src-tauri/mpv-libs/mpv-2.dll
+
+          echo "MPV_INCLUDE_DIR=$includePath"  >> $env:GITHUB_ENV
+          echo "MPV_LIB_DIR=$($dll.DirectoryName)" >> $env:GITHUB_ENV
+          Write-Host "MPV_INCLUDE_DIR=$includePath"
+          Write-Host "MPV_LIB_DIR=$($dll.DirectoryName)"
 
       - name: Install frontend deps
         run: npm install

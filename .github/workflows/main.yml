@@ -64,7 +64,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          # Find latest mpv-dev release
           $release = gh api repos/shinchiro/mpv-winbuild-cmake/releases `
             --jq '[.[] | select(.assets | length > 0)][0]' | ConvertFrom-Json
           $asset = $release.assets |
@@ -74,54 +73,52 @@ jobs:
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile mpv-dev.7z
           7z x mpv-dev.7z -ompv-dev -y
 
-          # Show extracted files
-          Get-ChildItem -Recurse mpv-dev | Select-Object -ExpandProperty FullName
-
-          # Find dll and include dir
           $dll     = Get-ChildItem -Recurse mpv-dev -Filter "*.dll" | Select-Object -First 1
           $clientH = Get-ChildItem -Recurse mpv-dev -Filter "client.h" | Select-Object -First 1
-          $includePath = if ($clientH) { $clientH.DirectoryName } else { "$pwd\mpv-dev" }
+          # include path should be the mpv/ parent, i.e. include/ not include/mpv/
+          $includePath = if ($clientH) { (Get-Item $clientH.DirectoryName).Parent.FullName } else { "$pwd\mpv-dev" }
 
-          if (-not $dll) { Write-Error "No dll found"; exit 1 }
-          Write-Host "Found dll: $($dll.FullName)"
-          Write-Host "Include dir: $includePath"
+          Write-Host "dll:     $($dll.FullName)"
+          Write-Host "include: $includePath"
 
-          # Generate MSVC-compatible mpv.lib from the dll using lib.exe + gendef
-          # lib.exe is available in the VS environment on windows-latest runners
           $libDir = "$pwd\mpv-msvc-lib"
           New-Item -ItemType Directory -Force -Path $libDir | Out-Null
           Copy-Item $dll.FullName "$libDir\"
 
-          # Create a .def file listing exports, then use lib.exe to make the .lib
-          # Use dumpbin to get exports (available with MSVC)
-          $dumpbin = & "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\*\bin\HostX64\x64\dumpbin.exe" 2>$null
-          $vsBase  = (Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC" |
-                      Sort-Object Name | Select-Object -Last 1).FullName
-          $dumpbin = "$vsBase\bin\HostX64\x64\dumpbin.exe"
-          $libExe  = "$vsBase\bin\HostX64\x64\lib.exe"
+          # Generate mpv.lib using llvm-lib (ships with VS on windows-latest)
+          # llvm-lib can create an import lib directly from a dll
+          $llvmLib = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin\llvm-lib.exe"
+          if (-not (Test-Path $llvmLib)) {
+            # fallback: find any llvm-lib on PATH
+            $llvmLib = (Get-Command llvm-lib.exe -ErrorAction SilentlyContinue)?.Source
+          }
 
-          Write-Host "dumpbin: $dumpbin"
-          Write-Host "lib.exe: $libExe"
+          if ($llvmLib) {
+            Write-Host "Using llvm-lib: $llvmLib"
+            & $llvmLib /DEF /OUT:"$libDir\mpv.lib" /MACHINE:X64 "$($dll.FullName)"
+          } else {
+            # fallback: use lib.exe via vswhere
+            $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $vsPath  = & $vsWhere -latest -property installationPath
+            $msvcVer = Get-ChildItem "$vsPath\VC\Tools\MSVC" | Sort-Object Name | Select-Object -Last 1
+            $libExe  = "$($msvcVer.FullName)\bin\HostX64\x64\lib.exe"
+            Write-Host "Using lib.exe: $libExe"
 
-          # Get export list
-          $exports = & $dumpbin /EXPORTS "$($dll.FullName)" |
-            Where-Object { $_ -match "^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)" } |
-            ForEach-Object { ($_ -split '\s+')[4] } |
-            Where-Object { $_ -and $_ -notmatch "^\s*$" }
+            # Need a .def file - generate from dll exports using dumpbin
+            $dumpbin = "$($msvcVer.FullName)\bin\HostX64\x64\dumpbin.exe"
+            $raw = & $dumpbin /EXPORTS "$($dll.FullName)" 2>&1
+            $exports = $raw | Where-Object { $_ -match "^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)" } |
+              ForEach-Object { ($_ -split '\s+', 5)[4].Trim() } |
+              Where-Object { $_ -ne "" }
+            Write-Host "Exports found: $($exports.Count)"
+            "EXPORTS`n$($exports -join "`n")" | Out-File "$libDir\mpv.def" -Encoding ASCII
+            & $libExe /DEF:"$libDir\mpv.def" /OUT:"$libDir\mpv.lib" /MACHINE:X64
+          }
 
-          Write-Host "Found $($exports.Count) exports"
-
-          # Write .def file
-          $defContent = "EXPORTS`n" + ($exports -join "`n")
-          $defFile = "$libDir\mpv.def"
-          $defContent | Out-File -FilePath $defFile -Encoding ASCII
-
-          # Generate mpv.lib
-          & $libExe /DEF:$defFile /OUT:"$libDir\mpv.lib" /MACHINE:X64
-          if ($LASTEXITCODE -ne 0) { Write-Error "lib.exe failed"; exit 1 }
-
-          Write-Host "Generated mpv.lib successfully"
-          Get-ChildItem $libDir
+          if (-not (Test-Path "$libDir\mpv.lib")) {
+            Write-Error "Failed to generate mpv.lib"; exit 1
+          }
+          Write-Host "mpv.lib generated: $(Get-Item "$libDir\mpv.lib" | Select-Object -ExpandProperty Length) bytes"
 
           echo "MPV_DLL=$($dll.FullName)"       >> $env:GITHUB_ENV
           echo "MPV_DLL_NAME=$($dll.Name)"      >> $env:GITHUB_ENV

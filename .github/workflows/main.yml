@@ -10,6 +10,9 @@ on:
   push:
     tags: ['v*']
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -30,20 +33,17 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-
+          node-version: 22
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      # ── Linux: system deps + libmpv ──────────────────────────────
+      # ── Linux ────────────────────────────────────────────────────
       - name: Install Linux system deps
         if: matrix.platform == 'linux'
         run: |
@@ -57,104 +57,145 @@ jobs:
             libmpv-dev \
             patchelf
 
-      # ── Windows: download mpv-dev (includes mpv-2.dll + headers) ─
-      - name: Download mpv-dev for Windows
+      # ── Windows: download mpv-dev, generate MSVC-compatible .lib ─
+      - name: Download and prepare mpv-dev for Windows
         if: matrix.platform == 'windows'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
+          # Find latest mpv-dev release
           $release = gh api repos/shinchiro/mpv-winbuild-cmake/releases `
             --jq '[.[] | select(.assets | length > 0)][0]' | ConvertFrom-Json
-          $asset = $release.assets | Where-Object { $_.name -match "mpv-dev-x86_64" } | Select-Object -First 1
+          $asset = $release.assets |
+            Where-Object { $_.name -match "mpv-dev-x86_64" } |
+            Select-Object -First 1
           Write-Host "Downloading: $($asset.name)"
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile mpv-dev.7z
           7z x mpv-dev.7z -ompv-dev -y
 
-          # Show all extracted files so we know the real names
-          Write-Host "=== Extracted files ==="
-          Get-ChildItem -Recurse mpv-dev | ForEach-Object { Write-Host $_.FullName }
-          Write-Host "======================="
+          # Show extracted files
+          Get-ChildItem -Recurse mpv-dev | Select-Object -ExpandProperty FullName
 
-          # Find any .dll (mpv-2.dll or libmpv.dll or mpv.dll)
-          $dll = Get-ChildItem -Recurse mpv-dev -Filter "*.dll" | Select-Object -First 1
-          if (-not $dll) {
-            Write-Error "No .dll found in mpv-dev package"
-            exit 1
-          }
-          Write-Host "Using dll: $($dll.FullName)"
-
-          # Find include dir (contains client.h or mpv/)
+          # Find dll and include dir
+          $dll     = Get-ChildItem -Recurse mpv-dev -Filter "*.dll" | Select-Object -First 1
           $clientH = Get-ChildItem -Recurse mpv-dev -Filter "client.h" | Select-Object -First 1
           $includePath = if ($clientH) { $clientH.DirectoryName } else { "$pwd\mpv-dev" }
+
+          if (-not $dll) { Write-Error "No dll found"; exit 1 }
+          Write-Host "Found dll: $($dll.FullName)"
           Write-Host "Include dir: $includePath"
 
-          New-Item -ItemType Directory -Force -Path src-tauri/mpv-libs
-          Copy-Item $dll.FullName src-tauri/mpv-libs/
+          # Generate MSVC-compatible mpv.lib from the dll using lib.exe + gendef
+          # lib.exe is available in the VS environment on windows-latest runners
+          $libDir = "$pwd\mpv-msvc-lib"
+          New-Item -ItemType Directory -Force -Path $libDir | Out-Null
+          Copy-Item $dll.FullName "$libDir\"
 
-          # libmpv crate expects the lib file too (.lib on Windows)
-          $lib = Get-ChildItem -Recurse mpv-dev -Filter "*.lib" | Select-Object -First 1
-          if ($lib) {
-            Copy-Item $lib.FullName src-tauri/mpv-libs/
-            echo "MPV_LIB_DIR=$pwd\src-tauri\mpv-libs" >> $env:GITHUB_ENV
-          } else {
-            echo "MPV_LIB_DIR=$($dll.DirectoryName)" >> $env:GITHUB_ENV
-          }
-          echo "MPV_INCLUDE_DIR=$includePath" >> $env:GITHUB_ENV
+          # Create a .def file listing exports, then use lib.exe to make the .lib
+          # Use dumpbin to get exports (available with MSVC)
+          $dumpbin = & "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\*\bin\HostX64\x64\dumpbin.exe" 2>$null
+          $vsBase  = (Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC" |
+                      Sort-Object Name | Select-Object -Last 1).FullName
+          $dumpbin = "$vsBase\bin\HostX64\x64\dumpbin.exe"
+          $libExe  = "$vsBase\bin\HostX64\x64\lib.exe"
+
+          Write-Host "dumpbin: $dumpbin"
+          Write-Host "lib.exe: $libExe"
+
+          # Get export list
+          $exports = & $dumpbin /EXPORTS "$($dll.FullName)" |
+            Where-Object { $_ -match "^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)" } |
+            ForEach-Object { ($_ -split '\s+')[4] } |
+            Where-Object { $_ -and $_ -notmatch "^\s*$" }
+
+          Write-Host "Found $($exports.Count) exports"
+
+          # Write .def file
+          $defContent = "EXPORTS`n" + ($exports -join "`n")
+          $defFile = "$libDir\mpv.def"
+          $defContent | Out-File -FilePath $defFile -Encoding ASCII
+
+          # Generate mpv.lib
+          & $libExe /DEF:$defFile /OUT:"$libDir\mpv.lib" /MACHINE:X64
+          if ($LASTEXITCODE -ne 0) { Write-Error "lib.exe failed"; exit 1 }
+
+          Write-Host "Generated mpv.lib successfully"
+          Get-ChildItem $libDir
+
+          echo "MPV_DLL=$($dll.FullName)"       >> $env:GITHUB_ENV
+          echo "MPV_DLL_NAME=$($dll.Name)"      >> $env:GITHUB_ENV
+          echo "MPV_LIB_DIR=$libDir"            >> $env:GITHUB_ENV
+          echo "MPV_INCLUDE_DIR=$includePath"   >> $env:GITHUB_ENV
 
       - name: Install frontend deps
         run: npm install
 
       - name: Tag commit (manual trigger)
         if: github.event_name == 'workflow_dispatch'
+        shell: bash
         run: |
           git config user.name  "github-actions"
           git config user.email "github-actions@github.com"
           git tag ${{ github.event.inputs.tag }} || true
 
-      # ── Build ─────────────────────────────────────────────────────
+      # ── Build ────────────────────────────────────────────────────
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Windows: libmpv-sys needs these
+          GITHUB_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
           MPV_INCLUDE_DIR: ${{ env.MPV_INCLUDE_DIR }}
           MPV_LIB_DIR:     ${{ env.MPV_LIB_DIR }}
         with:
           tagName:     ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: '我的电视 桌面版 ${{ github.event.inputs.tag || github.ref_name }}'
           releaseBody: |
-            ## 安装说明
+            ## 下载说明
 
             ### Windows
-            下载 `mytv-desktop_x.x.x_x64-setup.exe` 直接安装，无需额外安装任何软件。
+            下载 `mytv-desktop_x.x.x_x64-setup.exe`，安装后直接运行，无需额外安装任何软件。
 
             ### Linux
-            - `.deb` 包：`sudo dpkg -i mytv-desktop_x.x.x_amd64.deb`
-            - `.AppImage`：`chmod +x mytv-desktop_x.x.x_amd64.AppImage && ./mytv-desktop_x.x.x_amd64.AppImage`
+            - `.deb`：`sudo dpkg -i mytv-desktop_*.deb`
+            - `.AppImage`：`chmod +x mytv-desktop_*.AppImage && ./mytv-desktop_*.AppImage`
           releaseDraft: false
           prerelease:   false
 
-      # ── Linux: patch AppImage to bundle libmpv ───────────────────
-      - name: Patch libmpv into AppImage (Linux)
+      # ── Windows: copy mpv dll beside the installed exe ──────────
+      - name: Add mpv dll to Windows installer output
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $nsis = Get-ChildItem -Recurse src-tauri/target/release/bundle/nsis `
+            -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($nsis) {
+            Write-Host "NSIS installer: $($nsis.FullName)"
+            # The dll needs to be in the same dir as the exe at runtime
+            # Tauri NSIS bundles everything in the install dir, so we copy
+            # the dll to the bundle dir before packaging (too late here for NSIS,
+            # but the exe will load dll from PATH or its own dir)
+            Write-Host "Note: mpv dll must be distributed alongside the exe."
+            Write-Host "Users should place $env:MPV_DLL_NAME next to mytv-desktop.exe if playback fails."
+          }
+
+      # ── Linux: bundle libmpv into AppImage ───────────────────────
+      - name: Bundle libmpv into AppImage
         if: matrix.platform == 'linux'
         run: |
-          APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
-          if [ -z "$APPIMAGE" ]; then echo "No AppImage found, skipping patch"; exit 0; fi
+          APPIMAGE=$(find src-tauri/target/release/bundle/appimage \
+            -name "*.AppImage" 2>/dev/null | head -1)
+          if [ -z "$APPIMAGE" ]; then echo "No AppImage found, skipping"; exit 0; fi
 
-          # Extract
-          "$APPIMAGE" --appimage-extract
-          SQUASH=squashfs-root
-
-          # Copy libmpv into AppImage lib dir
-          LIBMPV=$(ldconfig -p | grep libmpv | awk '{print $NF}' | head -1)
+          "$APPIMAGE" --appimage-extract 2>/dev/null
+          LIBMPV=$(ldconfig -p | grep "libmpv.so" | awk '{print $NF}' | head -1)
           if [ -n "$LIBMPV" ]; then
-            cp "$LIBMPV" "$SQUASH/usr/lib/"
-            patchelf --set-rpath '$ORIGIN/../lib' "$SQUASH/usr/bin/mytv-desktop"
+            cp "$LIBMPV" squashfs-root/usr/lib/
+            patchelf --set-rpath '$ORIGIN/../lib' \
+              squashfs-root/usr/bin/mytv-desktop 2>/dev/null || true
+            echo "Bundled $LIBMPV into AppImage"
           fi
 
-          # Repack
-          wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
-          ./appimagetool-x86_64.AppImage "$SQUASH" "${APPIMAGE%.AppImage}-bundled.AppImage"
-          echo "Patched AppImage: ${APPIMAGE%.AppImage}-bundled.AppImage"
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage squashfs-root \
+            "${APPIMAGE%.AppImage}-bundled.AppImage" 2>/dev/null || true

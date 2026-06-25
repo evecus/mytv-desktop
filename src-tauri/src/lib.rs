@@ -3,15 +3,12 @@ mod player;
 mod speedrun;
 pub mod speedtest;
 
-use serde::Serialize;
 use std::sync::Mutex;
-use tauri::{Emitter, Manager, State};
+use tauri::State;
 
 pub struct AppState {
     pub channels: Mutex<Vec<m3u::Channel>>,
 }
-
-// ── Commands ──────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn load_channels(state: State<'_, AppState>) -> Result<Vec<m3u::Channel>, String> {
@@ -45,9 +42,6 @@ async fn stop_player() -> Result<(), String> {
     player::stop().map_err(|e| e.to_string())
 }
 
-// ── App entry ─────────────────────────────────────────────────────
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

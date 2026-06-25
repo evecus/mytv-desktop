@@ -11,6 +11,9 @@ crate-type = ["cdylib", "rlib"]
 name = "mytv-desktop"
 path = "src/main.rs"
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
 tauri              = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-shell = "2"
@@ -25,7 +28,6 @@ once_cell          = "1"
 chrono             = { version = "0.4", features = ["clock"] }
 futures-util       = "0.3"
 dirs               = "5"
-# libmpv bindings — plays video without requiring mpv installed
 libmpv             = "2"
 
 [features]

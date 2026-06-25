@@ -2,7 +2,7 @@ use crate::speedtest::config::*;
 use crate::speedtest::types::{Channel, SourceResult};
 use reqwest::Client;
 use serde_json::Value;
-use std::io::Read;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

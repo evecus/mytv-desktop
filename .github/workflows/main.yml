@@ -56,6 +56,8 @@ jobs:
             librsvg2-dev \
             libmpv-dev \
             patchelf
+          # dlls/ dir is Windows-only; remove placeholder so Tauri doesn't choke
+          rm -f src-tauri/dlls/.gitkeep
 
       # ── Windows: download mpv-dev, generate MSVC-compatible .lib ─
       - name: Download and prepare mpv-dev for Windows
@@ -123,6 +125,10 @@ jobs:
             Write-Error "Failed to generate mpv.lib"; exit 1
           }
           Write-Host "mpv.lib OK: $((Get-Item "$libDir\mpv.lib").Length) bytes"
+
+          # Copy dll into src-tauri/dlls/ so Tauri bundles it alongside the exe
+          Copy-Item $dll.FullName "src-tauri\dlls\"
+          Write-Host "Copied $($dll.Name) to src-tauri\dlls\"
 
           echo "MPV_DLL=$($dll.FullName)"      >> $env:GITHUB_ENV
           echo "MPV_DLL_NAME=$($dll.Name)"     >> $env:GITHUB_ENV

@@ -127,6 +127,7 @@ jobs:
           Write-Host "mpv.lib OK: $((Get-Item "$libDir\mpv.lib").Length) bytes"
 
           # Copy dll into src-tauri/dlls/ so Tauri bundles it alongside the exe
+          New-Item -ItemType Directory -Force -Path "src-tauri\dlls" | Out-Null
           Copy-Item $dll.FullName "src-tauri\dlls\"
           Write-Host "Copied $($dll.Name) to src-tauri\dlls\"
 

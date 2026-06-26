@@ -84,8 +84,20 @@
         <div class="overlay-card">
           <div class="spinner large"></div>
           <div class="overlay-title">正在测速</div>
-          <div class="overlay-progress">{{ store.speedtestProgress }}</div>
-          <div class="overlay-hint">测速过程约 2～5 分钟，完成后自动更新频道列表</div>
+          <div class="overlay-phase">{{ store.speedtestProgress || '准备中…' }}</div>
+
+          <!-- 进度条 -->
+          <div class="progress-track">
+            <div
+              class="progress-fill"
+              :style="{ width: (store.speedtestPercent > 0 ? store.speedtestPercent : 5) + '%' }"
+            ></div>
+          </div>
+          <div class="progress-pct">
+            {{ store.speedtestPercent > 0 ? store.speedtestPercent + '%' : '' }}
+          </div>
+
+          <div class="overlay-hint">测速完成后自动刷新频道列表</div>
         </div>
       </div>
     </Transition>
@@ -235,9 +247,23 @@ body {
   background: var(--bg2); border: 1px solid var(--border);
   border-radius: 16px; padding: 48px 56px; text-align: center; min-width: 320px;
 }
-.overlay-title  { font-size: 22px; font-weight: 700; margin: 24px 0 10px; }
-.overlay-progress { font-size: 14px; color: var(--text2); min-height: 22px; }
-.overlay-hint { font-size: 12px; color: var(--text2); margin-top: 18px; opacity: .6; }
+.overlay-title  { font-size: 22px; font-weight: 700; margin: 24px 0 12px; }
+.overlay-phase  { font-size: 14px; color: var(--text2); min-height: 22px; margin-bottom: 20px; }
+.overlay-hint   { font-size: 12px; color: var(--text2); margin-top: 16px; opacity: .6; }
+
+.progress-track {
+  width: 100%; height: 6px;
+  background: var(--border); border-radius: 3px; overflow: hidden;
+}
+.progress-fill {
+  height: 100%; background: var(--accent2);
+  border-radius: 3px;
+  transition: width .6s ease;
+}
+.progress-pct {
+  font-size: 12px; color: var(--text2);
+  margin-top: 6px; text-align: right; min-height: 18px;
+}
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 4px; }

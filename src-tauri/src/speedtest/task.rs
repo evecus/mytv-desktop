@@ -290,3 +290,133 @@ pub async fn run_task_android(
     );
     channel_count
 }
+
+// ── Desktop variant: accepts a progress callback ──────────────────────────
+
+pub async fn run_task_with_progress<F>(
+    workers: usize,
+    top_n: usize,
+    urls: Vec<String>,
+    output_path: &std::path::Path,
+    on_progress: F,
+) -> usize
+where
+    F: Fn(String) + Send + Sync + 'static,
+{
+    use std::sync::Arc;
+    let cb = Arc::new(on_progress);
+
+    if IS_RUNNING
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        cb("已有测速任务在运行".to_string());
+        return 0;
+    }
+
+    let start = std::time::Instant::now();
+    cb("── 测速开始 ──".to_string());
+
+    let std_map = get_standard_channel_map();
+    let mut all_entries: Vec<Entry> = vec![];
+    let mut source_idx = 0usize;
+
+    cb("正在获取 API 列表和订阅文件…".to_string());
+    let (api_items, sub_cache) = tokio::join!(
+        fetch_api_data(),
+        download_subscribes(&urls),
+    );
+
+    if !api_items.is_empty() {
+        cb(format!("正在测速 {} 个 API 源…", api_items.len()));
+        let raw_results = run_api_speed_tests(api_items, workers).await;
+        let mut top_sources = select_top_sources(raw_results, top_n);
+        cb(format!("筛选出 {} 个优质 API 源，获取频道中…", top_sources.len()));
+
+        for src in top_sources.iter_mut() {
+            fetch_channels_for_source(src).await;
+            let entries = match src.match_type.as_str() {
+                "txiptv" | "zhgxtv" | "jsmpeg" => {
+                    build_entries(&src.channels, source_idx, src.speed, &std_map)
+                }
+                "hsmdtv" => process_hsmdtv_channels(&src.host, source_idx, src.speed, &std_map),
+                _ => vec![],
+            };
+            all_entries.extend(entries);
+            source_idx += 1;
+        }
+    }
+
+    for (raw_url, cache_path) in &sub_cache {
+        let channels = crate::speedtest::subscribe::parse_subscribe_file(cache_path);
+        if channels.is_empty() {
+            continue;
+        }
+        cb(format!("正在测速订阅源频道 ({} 个)…", channels.len()));
+        let host_speeds = test_subscribe_hosts(&channels, workers).await;
+
+        let mut added = 0usize;
+        for ch in &channels {
+            let hk = crate::speedtest::subscribe::host_key(&ch.url);
+            let spd = match host_speeds.get(&hk) {
+                Some(&s) if s >= SPEED_LOW => s,
+                _ => continue,
+            };
+            let name = map_to_standard_name(
+                &clean_channel_name(&ch.name),
+                &std_map,
+            ).to_string();
+            all_entries.push(Entry {
+                content: build_m3u8_entry(&name, &ch.url, spd),
+                name,
+                url: ch.url.clone(),
+                index: source_idx,
+                speed: spd,
+            });
+            added += 1;
+        }
+        cb(format!("订阅源筛选完成，保留 {}/{} 个频道", added, channels.len()));
+        source_idx += 1;
+    }
+
+    cb(format!(
+        "收集到 {} 个候选频道，正在整理写入…",
+        all_entries.len()
+    ));
+
+    if all_entries.is_empty() {
+        IS_RUNNING.store(false, Ordering::Release);
+        cb("未找到可用频道".to_string());
+        return 0;
+    }
+
+    let update_time = chrono::Local::now();
+    let (m3u8, _txt) = crate::speedtest::output::build_and_write(all_entries, update_time);
+
+    if let Err(e) = std::fs::write(output_path, &m3u8) {
+        IS_RUNNING.store(false, Ordering::Release);
+        cb(format!("写入失败: {}", e));
+        return 0;
+    }
+
+    let channel_count = {
+        let mut names = std::collections::HashSet::new();
+        for line in m3u8.lines() {
+            if let Some(rest) = line.strip_prefix("#EXTINF") {
+                if let Some(idx) = rest.rfind(',') {
+                    let name = rest[idx + 1..].trim().to_string();
+                    if !name.is_empty() { names.insert(name); }
+                }
+            }
+        }
+        names.len()
+    };
+
+    IS_RUNNING.store(false, Ordering::Release);
+    cb(format!(
+        "测速完成！共 {} 个频道（耗时 {}s）",
+        channel_count,
+        start.elapsed().as_secs()
+    ));
+    channel_count
+}

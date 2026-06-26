@@ -12,6 +12,7 @@ export const useTVStore = defineStore('tv', {
     playerError: null,
     speedtestRunning: false,
     speedtestProgress: '',
+    speedtestPercent: 0,
     speedtestError: null,
     speedtestDoneMsg: '',
   }),
@@ -73,9 +74,18 @@ export const useTVStore = defineStore('tv', {
     },
 
     setupListeners() {
-      listen('speedtest://progress', e => { this.speedtestProgress = e.payload })
+      listen('speedtest://progress', e => {
+        const p = e.payload
+        if (typeof p === 'object') {
+          this.speedtestProgress = p.phase || ''
+          if (p.percent >= 0) this.speedtestPercent = p.percent
+        } else {
+          this.speedtestProgress = p
+        }
+      })
       listen('speedtest://done', e => {
         this.speedtestRunning = false
+        this.speedtestPercent = 100
         this.speedtestDoneMsg = `测速完成，共 ${e.payload} 个频道`
         this.loadChannels()
       })
